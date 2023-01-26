@@ -1,0 +1,37 @@
+alpha:
+  1:
+    text_field: alpha 1
+
+  2:
+    text_field: alpha 2
+
+  3: {}
+
+beta:
+  1:
+    alpha_id: =get alpha 1
+    text_field: beta 1
+
+  2:
+    alpha_id: =get alpha 3
+    text_field: beta 2
+
+gamma:
+  1:
+    beta_id: =get beta 1
+    text_field: gamma 1
+
+delta:
+  1:
+    alpha_id: =get alpha 2
+    gamma_id: =get gamma 1
+    text_field: delta 1
+
+epsilon:
+  1:
+    id: =ulid
+    text_field: epsilon 1
+
+  2:
+    id: =uuid
+    text_field: epsilon 2

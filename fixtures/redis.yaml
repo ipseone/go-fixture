@@ -1,0 +1,15 @@
+hashes:
+  1:
+    pairs:
+      a: a1
+      b: b2
+      c: c3
+
+keys:
+  1:
+    value: bar
+    ttl: 1m
+
+  2:
+    value: rand1
+    ttl: 1m
