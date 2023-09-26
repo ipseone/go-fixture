@@ -1,0 +1,7 @@
+1:
+  alpha_id: =ref alpha 1
+  text_field: beta 1
+
+2:
+  alpha_id: =ref alpha 3
+  text_field: beta 2

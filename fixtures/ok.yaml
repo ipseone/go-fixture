@@ -9,22 +9,22 @@ alpha:
 
 beta:
   1:
-    alpha_id: =get alpha 1
+    alpha_id: =ref alpha 1
     text_field: beta 1
 
   2:
-    alpha_id: =get alpha 3
+    alpha_id: =ref alpha 3
     text_field: beta 2
 
 gamma:
   1:
-    beta_id: =get beta 1
+    beta_id: =ref beta 1
     text_field: gamma 1
 
 delta:
   1:
-    alpha_id: =get alpha 2
-    gamma_id: =get gamma 1
+    alpha_id: =ref alpha 2
+    gamma_id: =ref gamma 1
     text_field: delta 1
 
 epsilon:
@@ -33,5 +33,25 @@ epsilon:
     text_field: epsilon 1
 
   2:
-    id: =uuid
+    id: =uuidv4
     text_field: epsilon 2
+
+z:
+  1:
+    zeta_id: =ulid
+    text_field: zeta 1
+
+  2:
+    zeta_id: =ulid
+    text_field: zeta 2
+
+eta:
+  1:
+    id: =ulid
+    the_zeta_id: "=ref z #"
+    text_field: eta 1
+
+  2:
+    id: =ulid
+    the_zeta_id: "=ref z #"
+    text_field: eta 2

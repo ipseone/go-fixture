@@ -1,0 +1,32 @@
+[alpha.1]
+text_field = "alpha 1"
+
+[alpha.2]
+text_field = "alpha 2"
+
+[alpha.3]
+
+[beta.1]
+alpha_id = "=ref alpha 1"
+text_field = "beta 1"
+
+[beta.2]
+alpha_id = "=ref alpha 3"
+text_field = "beta 2"
+
+[gamma.1]
+beta_id = "=ref beta 1"
+text_field = "gamma 1"
+
+[delta.1]
+alpha_id = "=ref alpha 2"
+gamma_id = "=ref gamma 1"
+text_field = "delta 1"
+
+[epsilon.1]
+id = "=ulid"
+text_field = "epsilon 1"
+
+[epsilon.2]
+id = "=uuidv4"
+text_field = "epsilon 2"

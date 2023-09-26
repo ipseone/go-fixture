@@ -1,15 +1,20 @@
 package fixture
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"strconv"
+	"strings"
 	"text/scanner"
+	"text/template"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/oklog/ulid/v2"
-	"github.com/rs/zerolog/log"
 )
+
+type CommandFunc func(in *CommandInput) (*CommandOutput, error)
 
 type CommandInput struct {
 	Fixture *Fixture
@@ -17,31 +22,79 @@ type CommandInput struct {
 	Key     string
 	Field   string
 
-	Scanner *scanner.Scanner
+	Line string
 }
 
 type CommandOutput struct {
-	Callback  func() (interface{}, error)
+	Callback  func() (any, error)
 	DependsOn [][2]string
-	Value     interface{}
+	IsUpdate  bool
+	Value     any
 }
 
-var commands = map[string]func(in *CommandInput) (*CommandOutput, error){
+func (in *CommandInput) ScanLine() ([]string, map[string]string, error) {
+	if in.Line == "" {
+		return nil, nil, nil
+	}
+
+	var args []string
+	var kwargs map[string]string
+	var equalsPrefix bool
+	var lastTxt string
+
+	parse := func(txt string) {
+		switch {
+		case txt == "=":
+			equalsPrefix = true
+			return
+		case equalsPrefix:
+			equalsPrefix = false
+
+			if kwargs == nil {
+				kwargs = make(map[string]string)
+			}
+
+			kwargs[lastTxt] = txt
+			lastTxt = ""
+			return
+		case lastTxt != "":
+			args = append(args, lastTxt)
+		}
+
+		lastTxt = txt
+	}
+
+	s := new(scanner.Scanner).Init(strings.NewReader(in.Line))
+
+	for tok := s.Scan(); tok != scanner.EOF; tok = s.Scan() {
+		parse(s.TokenText())
+	}
+
+	parse("")
+
+	return args, kwargs, nil
+}
+
+var commands = map[string]CommandFunc{
 	"base64dec": base64DecodeCommand,
-	"ref":       ref,
+	"key":       keyCommand,
+	"ref":       refCommand,
+	"template":  templateCommand,
 	"ulid":      ulidCommand,
-	"uuid":      uuidCommand,
+	"uuidv4":    uuidv4Command,
 }
 
 func base64DecodeCommand(in *CommandInput) (*CommandOutput, error) {
-	cmdScanner := in.Scanner
-	token := cmdScanner.Scan()
-
-	if token == scanner.EOF {
-		return nil, fmt.Errorf("expected base64 string at position 1")
+	args, _, err := in.ScanLine()
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan command line: %w", err)
 	}
 
-	encoded, err := strconv.Unquote(cmdScanner.TokenText())
+	if len(args) == 0 {
+		return nil, fmt.Errorf("expected at least 1 positional argument")
+	}
+
+	encoded, err := strconv.Unquote(args[0])
 	if err != nil {
 		return nil, fmt.Errorf("failed to unquote base64 string: %w", err)
 	}
@@ -58,62 +111,169 @@ func base64DecodeCommand(in *CommandInput) (*CommandOutput, error) {
 	return out, nil
 }
 
-func ref(in *CommandInput) (*CommandOutput, error) {
+func keyCommand(in *CommandInput) (*CommandOutput, error) {
+	args, _, err := in.ScanLine()
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan command line: %w", err)
+	}
+
+	var t string
+
+	if len(args) > 0 {
+		t = args[0]
+	}
+
+	var v any
+
+	switch t {
+	case "":
+		v = in.Key
+	case "int":
+		v, err = strconv.Atoi(in.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert key to int: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported key type: %s", t)
+	}
+
+	out := &CommandOutput{
+		Value: v,
+	}
+
+	return out, nil
+}
+
+func refCommand(in *CommandInput) (*CommandOutput, error) {
 	fixture := in.Fixture
-	cmdScanner := in.Scanner
-	tableToken := cmdScanner.Scan()
 
-	if tableToken == scanner.EOF {
-		return nil, fmt.Errorf("expected table name at position 1")
+	args, kwargs, err := in.ScanLine()
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan command line: %w", err)
 	}
 
-	table := cmdScanner.TokenText()
-	idToken := cmdScanner.Scan()
-
-	if idToken == scanner.EOF {
-		return nil, fmt.Errorf("expected id value at position 2")
+	if len(args) < 2 {
+		return nil, fmt.Errorf("expected at least 2 positional arguments")
 	}
 
-	key := cmdScanner.TokenText()
-	fieldToken := cmdScanner.Scan()
+	table, key := args[0], args[1]
 
 	var field string
 
-	if fieldToken == scanner.EOF {
-		field = fixture.IDFieldName
+	if len(args) >= 3 {
+		field = args[2]
+	} else if tableOptions, ok := fixture.Config.TableOptions[table]; ok && tableOptions.PrimaryKeyName != "" {
+		field = tableOptions.PrimaryKeyName
 	} else {
-		field = cmdScanner.TokenText()
+		field = fixture.Config.PrimaryKeyName
 	}
 
-	log.Debug().
-		Str("command", "get").
+	var update bool
+
+	if v, ok := kwargs["update"]; ok {
+		update = v == "true"
+	}
+
+	if key == "#" {
+		key = in.Key
+	}
+
+	fixture.Logger.Debug().
+		Str("command", "ref").
 		Str("table", table).
 		Str("key", key).
 		Str("field", field).
 		Send()
 
 	out := &CommandOutput{
-		Callback: func() (interface{}, error) {
+		Callback: func() (any, error) {
 			return fixture.GetField(table, key, field)
 		},
-		DependsOn: [][2]string{{table, key}},
+		IsUpdate: update,
+	}
+
+	if !update {
+		out.DependsOn = [][2]string{{table, key}}
+	}
+
+	return out, nil
+}
+func templateCommand(in *CommandInput) (*CommandOutput, error) {
+	fixture := in.Fixture
+	templateBuf := fixture.templateBuf
+
+	if templateBuf != nil {
+		templateBuf.Reset()
+	} else {
+		templateBuf = new(bytes.Buffer)
+		fixture.templateBuf = templateBuf
+	}
+
+	t, err := template.New("fixture").Funcs(funcMap).Parse(in.Line)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	if err := t.Execute(fixture.templateBuf, fixture.TemplateData); err != nil {
+		return nil, fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	out := &CommandOutput{
+		Value: templateBuf.String(),
 	}
 
 	return out, nil
 }
 
 func ulidCommand(in *CommandInput) (*CommandOutput, error) {
-	out := &CommandOutput{
-		Value: ulid.Make(),
+	_, kwargs, err := in.ScanLine()
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan command line: %w", err)
+	}
+
+	var fromString string
+
+	if v, ok := kwargs["fromString"]; ok {
+		fromString, err = strconv.Unquote(v)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unquote fromString: %w", err)
+		}
+	}
+
+	var ulidValue ulid.ULID
+
+	if fromString == "" {
+		ulidValue, err = ulid.New(ulid.Timestamp(time.Now().UTC()), ulid.DefaultEntropy())
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate ULID: %w", err)
+		}
+	} else {
+		ulidValue, err = ulid.Parse(fromString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse ulid fromString %q: %w", fromString, err)
+		}
+	}
+
+	out := &CommandOutput{}
+
+	if v, ok := kwargs["toString"]; ok && v == "true" {
+		out.Value = ulidValue.String()
+	} else {
+		out.Value = ulidValue
 	}
 
 	return out, nil
 }
 
 // Defaults to uuid v4.
-func uuidCommand(in *CommandInput) (*CommandOutput, error) {
+func uuidv4Command(in *CommandInput) (*CommandOutput, error) {
+	v, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate uuid: %w", err)
+	}
+
 	out := &CommandOutput{
-		Value: uuid.New(),
+		Value: v,
 	}
 
 	return out, nil

@@ -4,7 +4,6 @@ import (
 	"text/template"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
 )
 
 var funcMap template.FuncMap
@@ -25,10 +24,6 @@ func AddFuncMap(fm template.FuncMap) {
 	}
 
 	for k, v := range fm {
-		if _, ok := funcMap[k]; !ok {
-			funcMap[k] = v
-		} else {
-			log.Warn().Str("name", k).Msg("skipping duplicate template function")
-		}
+		funcMap[k] = v
 	}
 }
