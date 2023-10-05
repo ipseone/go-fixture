@@ -1,6 +1,7 @@
 package fixture
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -11,6 +12,7 @@ type TableOptions struct {
 	PrimaryKeyName string
 	References     map[string]string
 	DefaultValues  Record
+	BeforeWrite    func(ctx context.Context, record Record) error
 }
 
 type Config struct {

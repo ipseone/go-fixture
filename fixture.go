@@ -122,6 +122,13 @@ func (f *Fixture) Apply() error {
 		label := node.Label()
 		table, key := label[0], label[1]
 		record := f.Database[table][key]
+		tableOptions := f.Config.TableOptions[table]
+
+		if tableOptions != nil && tableOptions.BeforeWrite != nil {
+			if err := tableOptions.BeforeWrite(f.Context, record); err != nil {
+				return fmt.Errorf("failed to execute BeforeWrite func: %w", err)
+			}
+		}
 
 		if err := f.Writer.Insert(f, table, key, record); err != nil {
 			return fmt.Errorf("failed to insert record %q.%q: %w", table, key, err)
