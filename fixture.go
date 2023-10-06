@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -170,8 +171,23 @@ func (f *Fixture) parseTable(name string, table Table, recursiveDatabase Databas
 	tableOptions := f.Config.TableOptions[name]
 	hasTableOptions := tableOptions != nil
 	cmdName := f.cmdNameBuilder
+	syncWrites := (f.Config.WriteMode == WriteSync && (!hasTableOptions || tableOptions.WriteMode == 0)) || (hasTableOptions && tableOptions.WriteMode == WriteSync)
 
-	for key, record := range table {
+	keys := make([]string, len(table))
+	i := 0
+
+	for k := range table {
+		keys[i] = k
+		i++
+	}
+
+	if syncWrites {
+		sort.Strings(keys)
+	}
+
+	for i := range keys {
+		key := keys[i]
+		record := table[key]
 		nodeKey := [2]string{name, key}
 		node := f.GetNode(nodeKey)
 
@@ -190,6 +206,17 @@ func (f *Fixture) parseTable(name string, table Table, recursiveDatabase Databas
 
 		if !f.DoNotCreateDependencies && !f.touchedNodes[nodeKey] {
 			f.touchedNodes[nodeKey] = true
+		}
+
+		if syncWrites && i > 0 {
+			// When writing synchronously, add the previous key (node)
+			// as a dependency to ensure it is processed before this one.
+
+			dependencyNodeKey := [2]string{name, keys[i-1]}
+			dependencyNode := f.GetNode(dependencyNodeKey)
+
+			dependencyNode.AppendFrom(node)
+			node.AppendTo(dependencyNode)
 		}
 
 		for field, value := range record {

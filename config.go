@@ -7,10 +7,16 @@ import (
 	"sync"
 )
 
+const (
+	WriteAsync = 1
+	WriteSync  = 2
+)
+
 type TableOptions struct {
 	TableName      string
 	PrimaryKeyName string
 	References     map[string]string
+	WriteMode      int
 	DefaultValues  Record
 	BeforeWrite    func(ctx context.Context, record Record) error
 }
@@ -24,6 +30,10 @@ type Config struct {
 	// The default references for all tables.
 	// Can be overwritten by TableOptions.
 	References map[string]string
+
+	// Whether to write records asynchronously or synchronously.
+	// Default: WriteAsync
+	WriteMode int
 
 	// TableOptions can be used to set table specific options or
 	// create multiple profiles for the same table. E.g.:
