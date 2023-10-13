@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -136,20 +137,9 @@ func (f *Fixture) Apply() error {
 		}
 
 		for label, callback := range node.callbacks {
-			v, err := callback()
-			if err != nil {
+			if err := callback(); err != nil {
 				return fmt.Errorf("failed to execute callback %v: %w", label, err)
 			}
-
-			callbackTable, callbackKey, callbackField := label[0], label[1], label[2]
-			f.Database[callbackTable][callbackKey][callbackField] = v
-
-			f.Logger.Debug().
-				Str("table", callbackTable).
-				Str("key", callbackKey).
-				Str("field", callbackField).
-				Interface("value", v).
-				Msg("callback")
 		}
 	}
 
@@ -167,16 +157,15 @@ func (f *Fixture) Apply() error {
 	return nil
 }
 
-func (f *Fixture) parseTable(name string, table Table, recursiveDatabase Database) error {
-	tableOptions := f.Config.TableOptions[name]
+func (f *Fixture) parseTable(table string, databaseTable Table, recursiveDatabase Database) error {
+	tableOptions := f.Config.TableOptions[table]
 	hasTableOptions := tableOptions != nil
-	cmdName := f.cmdNameBuilder
 	syncWrites := (f.Config.WriteMode == WriteSync && (!hasTableOptions || tableOptions.WriteMode == 0)) || (hasTableOptions && tableOptions.WriteMode == WriteSync)
 
-	keys := make([]string, len(table))
+	keys := make([]string, len(databaseTable))
 	i := 0
 
-	for k := range table {
+	for k := range databaseTable {
 		keys[i] = k
 		i++
 	}
@@ -187,12 +176,12 @@ func (f *Fixture) parseTable(name string, table Table, recursiveDatabase Databas
 
 	for i := range keys {
 		key := keys[i]
-		record := table[key]
-		nodeKey := [2]string{name, key}
+		record := databaseTable[key]
+		nodeKey := [2]string{table, key}
 		node := f.GetNode(nodeKey)
 
 		f.Logger.Debug().
-			Str("table", name).
+			Str("table", table).
 			Str("key", key).
 			Send()
 
@@ -212,155 +201,235 @@ func (f *Fixture) parseTable(name string, table Table, recursiveDatabase Databas
 			// When writing synchronously, add the previous key (node)
 			// as a dependency to ensure it is processed before this one.
 
-			dependencyNodeKey := [2]string{name, keys[i-1]}
+			dependencyNodeKey := [2]string{table, keys[i-1]}
 			dependencyNode := f.GetNode(dependencyNodeKey)
 
 			dependencyNode.AppendFrom(node)
 			node.AppendTo(dependencyNode)
 		}
 
-		for field, value := range record {
+		for field := range record {
+			value := record[field]
+
+			// Copy to prevent closure issues.
+			fieldCopy := field
+
 			f.Logger.Debug().
 				Str("field", field).
 				Send()
 
 			recordErr := func(e error) *RecordError {
 				return &RecordError{
-					Table: name,
+					Table: table,
 					Key:   key,
 					Field: field,
 					Err:   e,
 				}
 			}
 
-			// Check if value is a function and replace it with its return.
-			if f, ok := value.(func(string) (any, error)); ok {
-				v, err := f(key)
-				if err != nil {
-					return recordErr(fmt.Errorf("failed to execute func: %w", err))
-				}
-
-				value = v
-				record[field] = v
-			}
-
-			v, ok := value.(string)
-
-			if !ok || v == "" {
-				continue
-			}
-
-			if v[0] != '=' {
-				refTable, _, err := f.Config.GetReference(name, field)
-				if err != nil {
-					return recordErr(fmt.Errorf("failed to get reference for %s.%s: %w", name, field, err))
-				}
-
-				if refTable != "" {
-					v = "=ref " + refTable + " " + v
-				} else {
-					// This can only be false if v is unchanged, meaning
-					// this field is not a registered reference.
-					continue
-				}
-			}
-
-			cmdName.Reset()
-
-			var breakIndex int
-
-			for i := 1; i < len(v); i++ {
-				c := v[i]
-
-				if c == ' ' || c == '\n' || c == '\t' {
-					breakIndex = i
-					break
-				}
-
-				cmdName.WriteByte(c)
-			}
-
-			cmdFunc, ok := commands[cmdName.String()]
-			if !ok {
-				return recordErr(fmt.Errorf("unknown command: %s", cmdName.String()))
-			}
-
-			cmdIn := &CommandInput{
-				Fixture: f,
-				Table:   name,
-				Key:     key,
-				Field:   field,
-			}
-
-			if breakIndex > 0 {
-				cmdIn.Line = v[breakIndex:]
-			}
-
-			cmdOut, err := cmdFunc(cmdIn)
+			v, err := f.parseField(
+				table,
+				key,
+				field,
+				value,
+				node,
+				recursiveDatabase,
+				func(v any) {
+					record[fieldCopy] = v
+				},
+			)
 			if err != nil {
-				return recordErr(fmt.Errorf(
-					"failed to execute command %s: %w",
-					cmdName.String(),
-					err,
-				))
+				return recordErr(err)
 			}
 
-			if len(cmdOut.DependsOn) == 0 {
-				record[field] = cmdOut.Value
-				continue
-			}
-
-			for j := range cmdOut.DependsOn {
-				dependencyNodeKey := cmdOut.DependsOn[j]
-				dependencyNode := f.GetNode(dependencyNodeKey)
-
-				if dependencyNode.callbacks == nil {
-					dependencyNode.callbacks = make(map[[3]string]func() (any, error))
-				}
-
-				// We add this record's callback to the dependency node so
-				// it will update the record once the dependency is resolved.
-				dependencyNode.callbacks[[3]string{name, key, field}] = cmdOut.Callback
-
-				dependencyNode.AppendFrom(node)
-				node.AppendTo(dependencyNode)
-
-				if f.DoNotCreateDependencies || f.touchedNodes[dependencyNodeKey] {
-					// The dependency has already been processed, nothing to do.
-					continue
-				}
-
-				f.touchedNodes[dependencyNodeKey] = true
-				depTableName, depKey := dependencyNodeKey[0], dependencyNodeKey[1]
-
-				// Check if table exists in the database.
-				if depTable, ok := f.Database[depTableName]; !ok {
-					f.Database[depTableName] = make(Table)
-				} else {
-					if _, ok := depTable[depKey]; ok {
-						// Record exists, nothing to do.
-						continue
-					}
-				}
-
-				// Add table/key to post-processing.
-				//
-				// The recursive database contains only the tables and records required to resolve
-				// dependencies, so the record is shared with the main database to ensure that
-				// when the recursive database is processed we are also updating the main.
-
-				if _, ok := recursiveDatabase[depTableName]; !ok {
-					recursiveDatabase[depTableName] = make(Table)
-				}
-
-				record := make(Record)
-				f.Database[depTableName][depKey] = record
-				recursiveDatabase[depTableName][depKey] = record
-			}
+			record[field] = v
 		}
 	}
 
 	return nil
+}
+
+func (f *Fixture) parseField(table, key, field string, value any, node *Node, recursiveDatabase Database, updateCallback func(v any)) (any, error) {
+	// Check if value is a function and replace it with its return.
+	if f, ok := value.(func(string) (any, error)); ok {
+		v, err := f(key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute func: %w", err)
+		}
+
+		value = v
+	}
+
+	var v string
+
+	switch t := value.(type) {
+	case []any:
+		for i := range t {
+			// Copy to prevent closure issues.
+			iCopy := i
+
+			a, err := f.parseField(
+				table,
+				key,
+				field+"."+strconv.Itoa(i),
+				t[i],
+				node,
+				recursiveDatabase,
+				func(v any) {
+					t[iCopy] = v
+				})
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse field %s.%d: %w", field, i, err)
+			}
+
+			t[i] = a
+		}
+	case map[string]any:
+		for k := range t {
+			// Copy to prevent closure issues.
+			kCopy := k
+
+			a, err := f.parseField(
+				table,
+				key,
+				field+"."+k,
+				t[k],
+				node,
+				recursiveDatabase,
+				func(v any) {
+					t[kCopy] = v
+				})
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse field %s.%s: %w", field, k, err)
+			}
+
+			t[k] = a
+		}
+
+		return t, nil
+	case string:
+		if t == "" {
+			return value, nil
+		}
+
+		v = t
+	default:
+		return value, nil
+	}
+
+	if v[0] != '=' {
+		refTable, _, err := f.Config.GetReference(table, field)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get reference for %s.%s: %w", table, field, err)
+		}
+
+		if refTable != "" {
+			v = "=ref " + refTable + " " + v
+		} else {
+			// This can only be false if v is unchanged, meaning
+			// this field is not a registered reference.
+			return value, nil
+		}
+	}
+
+	cmdName := new(strings.Builder)
+
+	var breakIndex int
+
+	for i := 1; i < len(v); i++ {
+		c := v[i]
+
+		if c == ' ' || c == '\n' || c == '\t' {
+			breakIndex = i
+			break
+		}
+
+		cmdName.WriteByte(c)
+	}
+
+	cmdFunc, ok := commands[cmdName.String()]
+	if !ok {
+		return nil, fmt.Errorf("unknown command: %s", cmdName.String())
+	}
+
+	cmdIn := &CommandInput{
+		Fixture: f,
+		Table:   table,
+		Key:     key,
+		Field:   field,
+	}
+
+	if breakIndex > 0 {
+		cmdIn.Line = v[breakIndex:]
+	}
+
+	cmdOut, err := cmdFunc(cmdIn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute command %s: %w", cmdName.String(), err)
+	}
+
+	if len(cmdOut.Dependencies) == 0 {
+		return cmdOut.Value, nil
+	}
+
+	for j := range cmdOut.Dependencies {
+		dependency := cmdOut.Dependencies[j]
+		dependencyNodeKey := cmdOut.Dependencies[j].Label
+		dependencyNode := f.GetNode(dependencyNodeKey)
+
+		if dependency.Callback != nil {
+			// We add this record's callback to the dependency node so
+			// it will update the record once the dependency is resolved.
+			dependencyNode.callbacks = append(dependencyNode.callbacks, func() error {
+				v, err := dependency.Callback()
+				if err != nil {
+					return err
+				}
+
+				updateCallback(v)
+
+				return nil
+			})
+		}
+
+		dependencyNode.AppendFrom(node)
+		node.AppendTo(dependencyNode)
+
+		if f.DoNotCreateDependencies || f.touchedNodes[dependencyNodeKey] {
+			// The dependency has already been processed, nothing to do.
+			continue
+		}
+
+		f.touchedNodes[dependencyNodeKey] = true
+		depTableName, depKey := dependencyNodeKey[0], dependencyNodeKey[1]
+
+		// Check if table exists in the database.
+		if depTable, ok := f.Database[depTableName]; ok {
+			if _, ok := depTable[depKey]; ok {
+				// Nothing to do, continue.
+				continue
+			}
+
+			// If we get here the table exists but the record (key) does not.
+			// Instead of using complex logic to check if the table
+			// has already been processed and act accordingly, it's easier
+			// and more consistent to add it to the recursiveDatabase.
+		}
+
+		// Add table/key to post-processing.
+		//
+		// The recursive database contains only the tables and records required to resolve
+		// dependencies, and can be merged with the main database after all tables
+		// have been processed.
+
+		if _, ok := recursiveDatabase[depTableName]; !ok {
+			recursiveDatabase[depTableName] = make(Table)
+		}
+
+		recursiveDatabase[depTableName][depKey] = make(Record)
+	}
+
+	return value, nil
 }
 
 func (f *Fixture) parseTemplate(body []byte) ([]byte, error) {
@@ -435,7 +504,25 @@ func (f *Fixture) handleDatabase(database Database) error {
 	}
 
 	if len(recursiveDatabase) > 0 {
-		return f.handleDatabase(recursiveDatabase)
+		if err := f.handleDatabase(recursiveDatabase); err != nil {
+			return err
+		}
+
+		// Add recursive database to main database.
+		for name := range recursiveDatabase {
+			table := recursiveDatabase[name]
+
+			t, ok := f.Database[name]
+			if !ok {
+				// If the table does not exist, add it.
+				f.Database[name] = table
+			} else {
+				// Otherwise add the missing records.
+				for k := range table {
+					t[k] = table[k]
+				}
+			}
+		}
 	}
 
 	return nil

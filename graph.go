@@ -8,7 +8,7 @@ type Node struct {
 	from  []*Node
 	to    []*Node
 
-	callbacks map[[3]string]func() (any, error)
+	callbacks []func() error
 }
 
 func (r *Node) ID() int64 {

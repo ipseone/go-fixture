@@ -25,11 +25,15 @@ type CommandInput struct {
 	Line string
 }
 
+type CommandDependency struct {
+	Label    [2]string
+	Callback func() (any, error)
+}
+
 type CommandOutput struct {
-	Callback  func() (any, error)
-	DependsOn [][2]string
-	IsUpdate  bool
-	Value     any
+	Dependencies []*CommandDependency
+	IsUpdate     bool
+	Value        any
 }
 
 func (in *CommandInput) ScanLine() ([]string, map[string]string, error) {
@@ -147,7 +151,7 @@ func keyCommand(in *CommandInput) (*CommandOutput, error) {
 func refCommand(in *CommandInput) (*CommandOutput, error) {
 	fixture := in.Fixture
 
-	args, kwargs, err := in.ScanLine()
+	args, _, err := in.ScanLine()
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan command line: %w", err)
 	}
@@ -168,12 +172,6 @@ func refCommand(in *CommandInput) (*CommandOutput, error) {
 		field = fixture.Config.PrimaryKeyName
 	}
 
-	var update bool
-
-	if v, ok := kwargs["update"]; ok {
-		update = v == "true"
-	}
-
 	if key == "#" {
 		key = in.Key
 	}
@@ -186,14 +184,12 @@ func refCommand(in *CommandInput) (*CommandOutput, error) {
 		Send()
 
 	out := &CommandOutput{
-		Callback: func() (any, error) {
-			return fixture.GetField(table, key, field)
-		},
-		IsUpdate: update,
-	}
-
-	if !update {
-		out.DependsOn = [][2]string{{table, key}}
+		Dependencies: []*CommandDependency{{
+			Label: [2]string{table, key},
+			Callback: func() (any, error) {
+				return fixture.GetField(table, key, field)
+			},
+		}},
 	}
 
 	return out, nil
