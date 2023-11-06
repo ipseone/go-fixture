@@ -432,7 +432,7 @@ func (f *Fixture) parseField(table, key, field string, value any, node *Node, re
 	return value, nil
 }
 
-func (f *Fixture) parseTemplate(body []byte) ([]byte, error) {
+func (f *Fixture) ParseTemplate(body []byte) ([]byte, error) {
 	if f.templateBuf == nil {
 		f.templateBuf = new(bytes.Buffer)
 	} else {
@@ -455,7 +455,7 @@ func (f *Fixture) parseBody(format int, data []byte, v any) error {
 	if f.TemplateData != nil {
 		var err error
 
-		data, err = f.parseTemplate(data)
+		data, err = f.ParseTemplate(data)
 		if err != nil {
 			return err
 		}
